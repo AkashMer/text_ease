@@ -161,6 +161,13 @@ tokenizer <- function(train, n = 2L) {
         return(NULL)
     }
 
+    # Get the words which only occur once
+    words_at_1 <- tibble(words = unlist(tokenize_ngrams(train$text, n = 1,
+                                                        simplify = TRUE))) %>%
+        count(words) %>%
+        filter(n < 2) %>%
+        select(words)
+
     # Divide the train set into quadgrams
     train_token <- tibble(text = unlist(tokenize_ngrams(train$text, n = n,
                                                        simplify = TRUE)))
@@ -183,6 +190,23 @@ tokenizer <- function(train, n = 2L) {
 
     # Get the word to integer conversion index
     word_index <- tidy(train_prep, 2)
+
+    # Get the vocabulary indices which occur only once
+    words_at_1_index <- semi_join(word_index[,2:3], words_at_1,
+                                  by = join_by(token == words))
+
+    # Get the replacement index of the unk token
+    unk_word_vocab <- nrow(word_index) + 1L
+    # Replace all words at 1 with unk token in baked train
+    baked_train <- baked_train %>%
+        mutate(across(all_of(column_names),
+                      ~replace(.x, words_at_1_index$vocabulary, unk_word_vocab)))
+
+    # Update the word_index to exclude words at 1 and include the unk token
+    word_index <- anti_join(word_index[,2:3], words_at_1,
+                            by = join_by(token == words))
+    word_index <- rbind(word_index, tibble(vocabulary = unk_word_vocab,
+                                           token = "<unk>"))
 
     return(list(baked_train, word_index))
 }
@@ -225,13 +249,13 @@ bigram_mkn_model <- function(data, vocab) {
     # Calculate the numerator as discounted counts
     counts1 <- counts %>%
         filter(raw_count == 1) %>%
-        mutate(mkn_count = max(raw_count - D1, 0), .keep = "unused")
+        mutate(mkn_count = raw_count - D1, .keep = "unused")
     counts2 <- counts %>%
         filter(raw_count == 2) %>%
-        mutate(mkn_count = max(raw_count - D2, 0), .keep = "unused")
+        mutate(mkn_count = raw_count - D2, .keep = "unused")
     counts3plus <- counts %>%
         filter(raw_count >= 3) %>%
-        mutate(mkn_count = max(raw_count - D3, 0), .keep = "unused")
+        mutate(mkn_count = raw_count - D3, .keep = "unused")
     counts <- rbind(counts1, counts2, counts3plus)
 
     # Calculate the denominator, count of word1
@@ -288,13 +312,13 @@ bigram_mkn_model <- function(data, vocab) {
     # Calculate the numerator as discounted counts
     counts1 <- counts %>%
         filter(kn_count == 1) %>%
-        mutate(mkn_count = max(kn_count - D1, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D1, .keep = "unused")
     counts2 <- counts %>%
         filter(kn_count == 2) %>%
-        mutate(mkn_count = max(kn_count - D2, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D2, .keep = "unused")
     counts3plus <- counts %>%
         filter(kn_count >= 3) %>%
-        mutate(mkn_count = max(kn_count - D3, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D3, .keep = "unused")
     counts <- rbind(counts1, counts2, counts3plus)
 
     # Calculate the denominator, total number of unique bigrams
@@ -306,22 +330,6 @@ bigram_mkn_model <- function(data, vocab) {
     probs <- counts %>%
         mutate(term2 = lambda1 * mkn_count/den) %>%
         select(-c(mkn_count, lambda1))
-
-    # -----BO weight 2-----
-    # BO weight will be used when the word1 and word2 both don't occur in the test corpus
-    # This will be used for <unk> token
-    # Add the token for <unk> to the vocabulary
-    unk_token_vocab <- vocab$vocabulary[nrow(vocab)] + 1L
-    vocab <- rbind(vocab[,2:3], tibble(vocabulary = unk_token_vocab,
-                                       token = "<unk>"))
-
-    # mean(lambda1) * lambda(empty string) * 1/V
-    # where V is vocabulary
-    # which can be simplified to mean(lambda1) * mean(D)/den
-    probs <- rbind(probs, tibble(word1 = unk_token_vocab,
-                                 word2 = unk_token_vocab,
-                                 term1 = mean_lambda1 * mean(c(D1, D2, D3))/den,
-                                 term2 = mean_lambda1 * mean(c(D1, D2, D3))/den))
 
     # Change the names to be more descriptive
     names(probs) <- c("word1", "output", "bigram_prob", "bo_unigram_prob")
@@ -355,7 +363,7 @@ evaluate_bigram_model <- function(prob_table, vocab, test, N) {
 
     # Remove bos1, bos2, bos3, and eos from the data set
     pattern <- "bos1 |bos2 | eos"
-    words <- str_remove_all(test$text, pattern = pattern)
+    words <- str_remove_all(validation$text, pattern = pattern)
 
     # Divide each sentence into bigrams
     words <- unlist(tokenize_ngrams(words, n = 2L, simplify = TRUE))
@@ -380,29 +388,15 @@ evaluate_bigram_model <- function(prob_table, vocab, test, N) {
     # Print for sanity check
     print(paste0("Total number of unique bigrams in the test set: ", nrow(words)))
 
-    # Convert it to a matrix
-    words <- as.matrix(words)
+    # For perplexity we will interpolate the probabilities
+    interpolated_prob_table <- prob_table %>%
+        mutate(prob = bigram_prob + bo_unigram_prob, .keep = "unused")
 
-    # Get the probabilities from the table
-    probs <- sapply(1:nrow(words), function(i) {
-
-        # Check for bigram
-        p <- prob_table %>%
-            filter(word1 == words[i, 1], output == words[i, 2]) %>%
-            select(bigram_prob)
-
-        # Get the unk token probability if nothing matches
-        if(nrow(p) == 0) {
-            p <- prob_table$bo_unigram_prob[nrow(prob_table)]
-        }
-
-        # Tracker
-        if(i %% 1000 == 0) {
-            print(paste0("Probability: ", i, " bigrams done"))
-        }
-
-        return(unlist(p))
-    })
+    # Get the probabilities
+    probs <- inner_join(interpolated_prob_table, words,
+                        by = join_by(word1 == word1, output == word2)) %>%
+        select(prob) %>%
+        unlist()
 
     # Convert to log
     probs <- log2(probs)
@@ -864,7 +858,7 @@ gc()
 
 load("data/train_sentences.RData")
 
-Nsample <- 1500000
+Nsample <- 600000
 # Take a random sample of 200k sentences
 # Other sample sizes tried 400k, 600k, 800k, 1M, and 1.5M
 # 2M sentences on the train sample causes ran out of memory issues
@@ -921,6 +915,8 @@ quadgram_mkn_model <- function(data, vocab) {
     require(dplyr)
     require(tidyr)
 
+    data <- baked_train
+
     # -----Term 1-----
     # Highest level probability based on raw counts
     counts <- data %>%
@@ -942,13 +938,13 @@ quadgram_mkn_model <- function(data, vocab) {
     # Calculate the numerator as discounted counts
     counts1 <- counts %>%
         filter(raw_count == 1) %>%
-        mutate(mkn_count = max(raw_count - D1, 0), .keep = "unused")
+        mutate(mkn_count = raw_count - D1, .keep = "unused")
     counts2 <- counts %>%
         filter(raw_count == 2) %>%
-        mutate(mkn_count = max(raw_count - D2, 0), .keep = "unused")
+        mutate(mkn_count = raw_count - D2, .keep = "unused")
     counts3plus <- counts %>%
         filter(raw_count >= 3) %>%
-        mutate(mkn_count = max(raw_count - D3, 0), .keep = "unused")
+        mutate(mkn_count = raw_count - D3, .keep = "unused")
     counts <- rbind(counts1, counts2, counts3plus)
 
     # Calculate the denominator, count of word1, word2, word3
@@ -1005,18 +1001,19 @@ quadgram_mkn_model <- function(data, vocab) {
     # Calculate the numerator as discounted counts
     counts1 <- counts %>%
         filter(kn_count == 1) %>%
-        mutate(mkn_count = max(kn_count - D1, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D1, .keep = "unused")
     counts2 <- counts %>%
         filter(kn_count == 2) %>%
-        mutate(mkn_count = max(kn_count - D2, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D2, .keep = "unused")
     counts3plus <- counts %>%
         filter(kn_count >= 3) %>%
-        mutate(mkn_count = max(kn_count - D3, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D3, .keep = "unused")
     counts <- rbind(counts1, counts2, counts3plus)
 
-    # Calculate the denominator, summation of numerator for each distinct word2, word3
+    # Calculate the denominator, same as numerator for each distinct word2, word3
+    # for all values of word4
     counts <- counts %>%
-        mutate(den = sum(mkn_count), .by = c(word2, word3))
+        mutate(den = length(unique(word1)), .by = c(word2, word3))
 
     # Calculate the term2 for the model which will be back-off weighted
     counts <- counts %>%
@@ -1042,7 +1039,7 @@ quadgram_mkn_model <- function(data, vocab) {
 
     # Normalize by dividing by den
     counts <- counts %>%
-        mutate(lambda2 = lambda1 * lambda_num/den) %>%
+        mutate(lambda2 = lambda_num/den) %>%
         select(-c(lambda_num, den))
     # Calculate a mean value to use with unk probability after unigram
     mean_lambda2 <- mean(counts$lambda2)
@@ -1068,18 +1065,19 @@ quadgram_mkn_model <- function(data, vocab) {
     # Calculate the numerator as discounted counts
     counts1 <- counts %>%
         filter(kn_count == 1) %>%
-        mutate(mkn_count = max(kn_count - D1, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D1, .keep = "unused")
     counts2 <- counts %>%
         filter(kn_count == 2) %>%
-        mutate(mkn_count = max(kn_count - D2, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D2, .keep = "unused")
     counts3plus <- counts %>%
         filter(kn_count >= 3) %>%
-        mutate(mkn_count = max(kn_count - D3, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D3, .keep = "unused")
     counts <- rbind(counts1, counts2, counts3plus)
 
-    # Calculate the denominator, summation of numerator for each distinct word3
+    # Calculate the denominator, same as numerator for each distinct word2, word3
+    # for all values of word4
     counts <- counts %>%
-        mutate(den = sum(mkn_count), .by = word3)
+        mutate(den = length(unique(word2)), .by = word3)
 
     # Calculate the term3 for the model
     counts <- counts %>%
@@ -1105,7 +1103,7 @@ quadgram_mkn_model <- function(data, vocab) {
 
     # Normalize by dividing by den
     counts <- counts %>%
-        mutate(lambda3 = lambda1 * lambda2 * lambda_num/den) %>%
+        mutate(lambda3 = lambda_num/den) %>%
         select(-c(lambda_num, den))
     # Calculate a mean value to use with unk probability after unigram
     mean_lambda3 <- mean(counts$lambda3)
@@ -1131,13 +1129,13 @@ quadgram_mkn_model <- function(data, vocab) {
     # Calculate the numerator as discounted counts
     counts1 <- counts %>%
         filter(kn_count == 1) %>%
-        mutate(mkn_count = max(kn_count - D1, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D1, .keep = "unused")
     counts2 <- counts %>%
         filter(kn_count == 2) %>%
-        mutate(mkn_count = max(kn_count - D2, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D2, .keep = "unused")
     counts3plus <- counts %>%
         filter(kn_count >= 3) %>%
-        mutate(mkn_count = max(kn_count - D3, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D3, .keep = "unused")
     counts <- rbind(counts1, counts2, counts3plus)
 
     # Calculate the denominator, total number of unique bigrams
@@ -1151,26 +1149,24 @@ quadgram_mkn_model <- function(data, vocab) {
         mutate(term4 = lambda1 * lambda2 * lambda3 * mkn_count/den) %>%
         select(-c(mkn_count, lambda1, lambda2, lambda3))
 
-    # -----BO weight 4-----
-    # This will be used for <unk> token
-    # Add the token for <unk> to the vocabulary
-    unk_token_vocab <- vocab$vocabulary[nrow(vocab)] + 1L
-    vocab <- rbind(vocab[,2:3], tibble(vocabulary = unk_token_vocab,
-                                       token = "<unk>"))
+    # # -----BO weight 4-----
+    # # This will be used for <unk> token
+    # # Add the token for <unk> to the vocabulary
+    # unk_token_vocab <- vocab$vocabulary[nrow(vocab)] + 1L
+    # vocab <- rbind(vocab[,2:3], tibble(vocabulary = unk_token_vocab,
+    #                                    token = "<unk>"))
 
-    # mean(lambda1) * mean(lambda2) * mean(lambda3) * lambda(empty string) * 1/V
-    # where V is vocabulary
-    # which can be simplified to mean(lambda1) * lambda2 * lambda3 * mean(D)/den
-    probs <- rbind(probs, tibble(word1 = unk_token_vocab,
-                                 word2 = unk_token_vocab,
-                                 word3 = unk_token_vocab,
-                                 word4 = unk_token_vocab,
-                                 term1 = 0,
-                                 term2 = 0,
-                                 term3 = 0,
-                                 term4 = mean_lambda1 * mean_lambda2 *
-                                     mean_lambda3 *
-                                     mean(c(D1, D2, D3))/den))
+    # # Left out weight, which is simply 1 - lambda1*lambda2*lambda3
+    # # multiplied by 1/V, where V is vocabulary set
+    # V <- nrow(vocab)
+    # probs <- rbind(probs, tibble(word1 = unk_token_vocab,
+    #                              word2 = unk_token_vocab,
+    #                              word3 = unk_token_vocab,
+    #                              word4 = unk_token_vocab,
+    #                              term1 = 0,
+    #                              term2 = 0,
+    #                              term3 = 0,
+    #                              term4 = ))
 
     # Change the names to be more descriptive
     names(probs) <- c("word1", "word2", "word3", "output", "quadgram_prob",
@@ -1515,7 +1511,8 @@ evaluate_quadgram_model <- function(prob_table, vocab, test, N) {
 load("data/validation_sentences.RData")
 
 # Evaluate the unigram model
-result <- evaluate_quadgram_model(quadgram_model_probs, quadgram_model_vocab, validation, Nsample)
+result <- evaluate_quadgram_model(quadgram_model_probs, quadgram_model_vocab,
+                                  validation, Nsample)
 
 # Save this result
 write.table(result, file = "data/mkn_metrics.csv", row.names = FALSE,
@@ -1528,3 +1525,119 @@ save(quadgram_model_probs, quadgram_model_vocab, file = "data/mkn_quadgram_model
 rm(quadgram_model_probs, quadgram_model_vocab, result)
 gc()
 
+# -------------------- Final Model -------------------------------------
+
+# Final model will be mkn_quadgram_model with 1.5M training sentences
+load("data/mkn_quadgram_model_1halfM.RData")
+
+# Check the model accuracy on the test set which was not used during
+# model building
+load("data/test_sentences.RData")
+Nsample <- 1500000
+result <- evaluate_quadgram_model(quadgram_model_probs, quadgram_model_vocab,
+                                  test, Nsample)
+
+# Save this result
+write.csv(result, file = "data/mkn_final_model_metrics.csv", row.names = FALSE,
+          quote = FALSE)
+
+# Last task before final model is saved
+# Remove any curse words from the output column
+# Download the Kaggle bad bad words data set
+#' [Link](https://www.kaggle.com/datasets/nicapotato/bad-bad-words/download?datasetVersionNumber=1)
+bad_words <- read.csv("data/bad-words.csv")
+
+# Find out the vocabulary values if any occur in the vocabulary
+bad_words_vocab <- quadgram_model_vocab$vocabulary[match(bad_words$jigaboo,
+                                                         quadgram_model_vocab$token)]
+# Remove any non matches, ie NAs
+bad_words_vocab <- bad_words_vocab[-which(is.na(bad_words_vocab))]
+# Convert to a tibble to ensure easier anti-join
+bad_words_vocab <- tibble(output = bad_words_vocab)
+
+# Remove any rows which contain these as outputs
+final_model <- anti_join(quadgram_model_probs, bad_words_vocab)
+final_model_vocab <- quadgram_model_vocab
+
+# Get the object size
+print(object.size(final_model), units = "Mb")
+print(object.size(final_model_vocab), units = "Mb")
+
+# Save the final model
+save(final_model, final_model_vocab, file = "data/final_mkn_model.RData")
+
+#' 1.5 M causes oom issues
+#' Moving to lower model
+load("data/mkn_quadgram_model600k.RData")
+
+# remove bad words
+bad_words <- read.csv("data/bad-words.csv")
+# Find out the vocabulary values if any occur in the vocabulary
+bad_words_vocab <- quadgram_model_vocab$vocabulary[match(bad_words$jigaboo,
+                                                         quadgram_model_vocab$token)]
+# Remove any non matches, ie NAs
+bad_words_vocab <- bad_words_vocab[-which(is.na(bad_words_vocab))]
+# Convert to a tibble to ensure easier anti-join
+bad_words_vocab <- tibble(output = bad_words_vocab)
+
+# Remove any rows which contain these as outputs
+final_model <- anti_join(quadgram_model_probs, bad_words_vocab)
+final_model_vocab <- quadgram_model_vocab
+
+# Get the object size
+print(object.size(final_model), units = "Mb")
+print(object.size(final_model_vocab), units = "Mb")
+
+# Save the final model
+save(final_model, final_model_vocab, file = "text_ease/data/final_mkn_model.RData")
+
+# Moving one step up
+# Trying 800k
+load("data/mkn_quadgram_model800k.RData")
+
+# remove bad words
+bad_words <- read.csv("data/bad-words.csv")
+# Find out the vocabulary values if any occur in the vocabulary
+bad_words_vocab <- quadgram_model_vocab$vocabulary[match(bad_words$jigaboo,
+                                                         quadgram_model_vocab$token)]
+# Remove any non matches, ie NAs
+bad_words_vocab <- bad_words_vocab[-which(is.na(bad_words_vocab))]
+# Convert to a tibble to ensure easier anti-join
+bad_words_vocab <- tibble(output = bad_words_vocab)
+
+# Remove any rows which contain these as outputs
+final_model <- anti_join(quadgram_model_probs, bad_words_vocab)
+final_model_vocab <- quadgram_model_vocab
+
+# Get the object size
+print(object.size(final_model), units = "Mb")
+print(object.size(final_model_vocab), units = "Mb")
+
+# Save the final model
+save(final_model, final_model_vocab, file = "text_ease/data/final_mkn_model.RData")
+# 800k causes oom issues as well
+# Final model will be 600k
+
+#' Moving to lower model
+load("data/mkn_quadgram_model600k.RData")
+
+# remove bad words
+bad_words <- read.csv("data/bad-words.csv")
+# Find out the vocabulary values if any occur in the vocabulary
+bad_words_vocab <- quadgram_model_vocab$vocabulary[match(bad_words$jigaboo,
+                                                         quadgram_model_vocab$token)]
+# Remove any non matches, ie NAs
+bad_words_vocab <- bad_words_vocab[-which(is.na(bad_words_vocab))]
+# Convert to a tibble to ensure easier anti-join
+bad_words_vocab <- tibble(output = bad_words_vocab)
+
+# Remove any rows which contain these as outputs
+final_model <- anti_join(quadgram_model_probs, bad_words_vocab)
+final_model_vocab <- quadgram_model_vocab
+
+# Get the object size
+print(object.size(final_model), units = "Mb")
+print(object.size(final_model_vocab), units = "Mb")
+
+# Save the final model
+save(final_model, final_model_vocab, file = "text_ease/data/final_mkn_model.RData")
