@@ -5,9 +5,9 @@ library(readr)
 twitter <- read_lines("data/en_US/en_US.twitter.txt", progress = TRUE,
                       num_threads = 4)
 blogs <- read_lines("data/en_US/en_US.blogs.txt", progress = TRUE,
-                      num_threads = 4)
+                    num_threads = 4)
 news <- read_lines("data/en_US/en_US.news.txt", progress = TRUE,
-                      num_threads = 4)
+                   num_threads = 4)
 
 # Combining all into one long character vector since we will be
 # removing numbers and punctuation which will bring all 3 closer to each other
@@ -170,7 +170,7 @@ tokenizer <- function(train, n = 2L) {
 
     # Divide the train set into quadgrams
     train_token <- tibble(text = unlist(tokenize_ngrams(train$text, n = n,
-                                                       simplify = TRUE)))
+                                                        simplify = TRUE)))
 
     require(textrecipes)
     # Recipe which will give one hot encoding of these sequences
@@ -200,7 +200,8 @@ tokenizer <- function(train, n = 2L) {
     # Replace all words at 1 with unk token in baked train
     baked_train <- baked_train %>%
         mutate(across(all_of(column_names),
-                      ~replace(.x, words_at_1_index$vocabulary, unk_word_vocab)))
+                      ~replace(.x, .x %in% words_at_1_index$vocabulary,
+                               unk_word_vocab)))
 
     # Update the word_index to exclude words at 1 and include the unk token
     word_index <- anti_join(word_index[,2:3], words_at_1,
@@ -363,7 +364,7 @@ evaluate_bigram_model <- function(prob_table, vocab, test, N) {
 
     # Remove bos1, bos2, bos3, and eos from the data set
     pattern <- "bos1 |bos2 | eos"
-    words <- str_remove_all(validation$text, pattern = pattern)
+    words <- str_remove_all(test$text, pattern = pattern)
 
     # Divide each sentence into bigrams
     words <- unlist(tokenize_ngrams(words, n = 2L, simplify = TRUE))
@@ -385,67 +386,82 @@ evaluate_bigram_model <- function(prob_table, vocab, test, N) {
     words <- words %>%
         distinct(word1, word2)
 
-    # Print for sanity check
-    print(paste0("Total number of unique bigrams in the test set: ", nrow(words)))
-
-    # For perplexity we will interpolate the probabilities
-    interpolated_prob_table <- prob_table %>%
-        mutate(prob = bigram_prob + bo_unigram_prob, .keep = "unused")
-
-    # Get the probabilities
-    probs <- inner_join(interpolated_prob_table, words,
-                        by = join_by(word1 == word1, output == word2)) %>%
-        select(prob) %>%
-        unlist()
-
-    # Convert to log
-    probs <- log2(probs)
-
     # Calculate the number of bigrams in the test set
     Wt <- nrow(words)
+
+    # Print for sanity check
+    print(paste0("Total number of unique bigrams in the test set: ", Wt))
+
+    # Get the probabilities
+    probs1 <- inner_join(prob_table, words,
+                         by = join_by(word1 == word1, output == word2)) %>%
+        select(word1, output, bigram_prob)
+    # Subset the words with no match
+    words_subset <- anti_join(words, probs1,
+                              by = join_by(word1 == word1, word2 == output))
+
+    # Tracker
+    print("Bigram Probabilities matched")
+
+    # Back off to weighted unigram probabilities
+    unigram_prob_table <- prob_table %>%
+        select(output, bo_unigram_prob) %>%
+        distinct(output, .keep_all = TRUE)
+    probs2 <- inner_join(unigram_prob_table, words_subset,
+                         by = join_by(output == word2))
+
+    # Tracker
+    print("Unigram Probabilities matched")
+
+    # Convert to log
+    probs <- c(probs1$bigram_prob, probs2$bo_unigram_prob)
+    probs <- log2(probs)
 
     # Calculate perplexity
     cross_entropy <- -sum(probs)/Wt
     perplexity <- 2^cross_entropy
 
-    # Check the accuracy
-    accuracy <- sapply(1:nrow(words), function(i) {
+    # Sanity check
+    print(paste0("Perplexity = ", perplexity))
 
-        library(dplyr)
+    # Calculate accuracy
+    accuracy <- vector(mode = "integer")
+    # Check at bigram level
+    top3 <- prob_table %>%
+        select(word1, output, bigram_prob) %>%
+        slice_max(order_by = bigram_prob, n = 3,
+                  by = word1, with_ties = FALSE)
+    # Match
+    match <- inner_join(words, top3, by = join_by(word1 == word1, word2 == output))
+    accuracy <- c(accuracy, nrow(match))
+    # Exclude out already matched bigrams
+    words_subset <- anti_join(words, match, by = join_by(word1 == word1,
+                                                         word2 == word2))
+    # Tracker
+    print("Bigrams matched")
 
-        # Check for bigram
-        predictions <- prob_table %>%
-            filter(word1 == words[i, 1]) %>%
-            arrange(desc(bigram_prob)) %>%
-            select(output) %>%
-            unlist()
+    # Get the top 3 choices for each word2
+    top3 <- prob_table %>%
+        select(output, bo_unigram_prob) %>%
+        distinct(output, .keep_all = TRUE) %>%
+        slice_max(order_by = bo_unigram_prob, n = 3, with_ties = FALSE)
+    # Match
+    match <- inner_join(words_subset, top3, by = join_by(word2 == output))
+    accuracy <- c(accuracy, nrow(match))
+    # Tracker
+    print("Unigrams matched")
 
-        # Check for unigram if necessary
-        if(length(predictions) < 3) {
-            predictions <- prob_table %>%
-                arrange(desc(bo_unigram_prob)) %>%
-                select(output) %>%
-                unlist()
-            predictions <- unique(predictions)
-        }
-
-        # Get the top 3
-        predictions <- predictions[1:3]
-
-        # Tracker
-        if(i %% 1000 == 0) {
-            print(paste0("Predictions: ", i, " bigrams done"))
-        }
-
-        # Check if it matches w[2]
-        return(words[i, 2] %in% predictions)
-    })
 
     # Calculate accuracy
     accuracy <- sum(accuracy)/Wt
 
+    # Sanity check
+    print(paste0("Accuracy = ", round(accuracy*100, 2), " %"))
+
     # Return a evaluation table
-    return(tibble(model = "mkn_bigram", sample_size = N,
+    return(tibble(model = "mkn_bigram",
+                  sample_size = N,
+                  vocab_size = nrow(vocab) - 5,
                   cross_entropy = cross_entropy,
                   perplexity = perplexity, accuracy = accuracy))
 }
@@ -460,7 +476,7 @@ result <- evaluate_bigram_model(bigram_model_probs, bigram_model_vocab, validati
 write.csv(result, file = "data/mkn_metrics.csv", quote = FALSE, row.names = FALSE)
 
 # Save the model
-save(bigram_model_probs, bigram_model_vocab, file = "data/mkn_bigram_model1M.RData")
+save(bigram_model_probs, bigram_model_vocab, file = "data/mkn_bigram_model200k.RData")
 
 # Remove
 rm(bigram_model_probs, bigram_model_vocab, result)
@@ -470,7 +486,6 @@ gc()
 
 load("data/train_sentences.RData")
 
-Nsample <- 3500000
 # Take a random sample of 200k sentences
 set.seed(20823) # setting seed for reproducibility
 train_sample <- train[sample(1:nrow(train), size = Nsample),]
@@ -518,13 +533,13 @@ trigram_mkn_model <- function(data, vocab) {
     # Calculate the numerator as discounted counts
     counts1 <- counts %>%
         filter(raw_count == 1) %>%
-        mutate(mkn_count = max(raw_count - D1, 0), .keep = "unused")
+        mutate(mkn_count = raw_count - D1, .keep = "unused")
     counts2 <- counts %>%
         filter(raw_count == 2) %>%
-        mutate(mkn_count = max(raw_count - D2, 0), .keep = "unused")
+        mutate(mkn_count = raw_count - D2, .keep = "unused")
     counts3plus <- counts %>%
         filter(raw_count >= 3) %>%
-        mutate(mkn_count = max(raw_count - D3, 0), .keep = "unused")
+        mutate(mkn_count = raw_count - D3, .keep = "unused")
     counts <- rbind(counts1, counts2, counts3plus)
 
     # Calculate the denominator, count of word1
@@ -557,8 +572,6 @@ trigram_mkn_model <- function(data, vocab) {
     # Normalize by dividing by den
     counts <- counts %>%
         mutate(lambda1 = lambda_num/den, .keep = "unused")
-    # Calculate a mean value to use with unk probability after unigram
-    mean_lambda1 <- mean(counts$lambda1)
 
     # -----Term 2-----
     # Term 2 will be the BO-weighted bigram probabilities
@@ -581,18 +594,18 @@ trigram_mkn_model <- function(data, vocab) {
     # Calculate the numerator as discounted counts
     counts1 <- counts %>%
         filter(kn_count == 1) %>%
-        mutate(mkn_count = max(kn_count - D1, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D1, .keep = "unused")
     counts2 <- counts %>%
         filter(kn_count == 2) %>%
-        mutate(mkn_count = max(kn_count - D2, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D2, .keep = "unused")
     counts3plus <- counts %>%
         filter(kn_count >= 3) %>%
-        mutate(mkn_count = max(kn_count - D3, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D3, .keep = "unused")
     counts <- rbind(counts1, counts2, counts3plus)
 
     # Calculate the denominator, summation of numerator for each distinct word2
     counts <- counts %>%
-        mutate(den = sum(mkn_count), .by = word2)
+        mutate(den = length(unique(word1)), .by = word2)
 
     # Calculate the term2 for the model
     counts <- counts %>%
@@ -618,10 +631,8 @@ trigram_mkn_model <- function(data, vocab) {
 
     # Normalize by dividing by den
     counts <- counts %>%
-        mutate(lambda2 = lambda1 * lambda_num/den) %>%
+        mutate(lambda2 = lambda_num/den) %>%
         select(-c(lambda_num, den))
-    # Calculate a mean value to use with unk probability after unigram
-    mean_lambda2 <- mean(counts$lambda2)
 
     # -----Term 3-----
     # Term 3 will be the BO-weighted unigram probabilities
@@ -644,13 +655,13 @@ trigram_mkn_model <- function(data, vocab) {
     # Calculate the numerator as discounted counts
     counts1 <- counts %>%
         filter(kn_count == 1) %>%
-        mutate(mkn_count = max(kn_count - D1, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D1, .keep = "unused")
     counts2 <- counts %>%
         filter(kn_count == 2) %>%
-        mutate(mkn_count = max(kn_count - D2, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D2, .keep = "unused")
     counts3plus <- counts %>%
         filter(kn_count >= 3) %>%
-        mutate(mkn_count = max(kn_count - D3, 0), .keep = "unused")
+        mutate(mkn_count = kn_count - D3, .keep = "unused")
     counts <- rbind(counts1, counts2, counts3plus)
 
     # Calculate the denominator, total number of unique bigrams
@@ -662,24 +673,6 @@ trigram_mkn_model <- function(data, vocab) {
     probs <- counts %>%
         mutate(term3 = lambda1 * lambda2 * mkn_count/den) %>%
         select(-c(mkn_count, lambda1, lambda2))
-
-    # -----BO weight 3-----
-    # This will be used for <unk> token
-    # Add the token for <unk> to the vocabulary
-    unk_token_vocab <- vocab$vocabulary[nrow(vocab)] + 1L
-    vocab <- rbind(vocab[,2:3], tibble(vocabulary = unk_token_vocab,
-                                       token = "<unk>"))
-
-    # mean(lambda1) * lambda2 * lambda(empty string) * 1/V
-    # where V is vocabulary
-    # which can be simplified to mean(lambda1) * lambda2 * mean(D)/den
-    probs <- rbind(probs, tibble(word1 = unk_token_vocab,
-                                 word2 = unk_token_vocab,
-                                 word3 = unk_token_vocab,
-                                 term1 = 0,
-                                 term2 = 0,
-                                 term3 = mean_lambda1 * mean_lambda2 *
-                                     mean(c(D1, D2, D3))/den))
 
     # Change the names to be more descriptive
     names(probs) <- c("word1", "word2", "output",
@@ -738,103 +731,116 @@ evaluate_trigram_model <- function(prob_table, vocab, test, N) {
     words <- words %>%
         distinct(word1, word2, word3)
 
-    # Convert it to a matrix
-    words <- as.matrix(words)
+    # Calculate the number of bigrams in the test set
+    Wt <- nrow(words)
 
-    # For probabilities we will use interpolated model
-    interpolated_prob_table <- prob_table %>%
-        mutate(prob = trigram_prob + bo_bigram_prob + bo_unigram_prob,
-               .keep = "unused")
+    # Print for sanity check
+    print(paste0("Total number of unique bigrams in the test set: ", Wt))
 
-    # Get the probabilities from the table
-    probs <- sapply(1:nrow(words), function(i) {
+    # Get the probabilities
+    probs1 <- inner_join(prob_table, words,
+                         by = join_by(word1 == word1, word2 == word2,
+                                      output == word3)) %>%
+        select(word1, word2, output, trigram_prob)
+    # Subset the words with no match
+    words_subset <- anti_join(words, probs1,
+                              by = join_by(word1 == word1, word2 == word2,
+                                           word3 == output))
+    # Tracker
+    print("Trigram Probabilities matched")
 
-        # Check for trigram
-        p <- interpolated_prob_table %>%
-            filter(word1 == words[i, 1], word2 == words[2], output == words[3]) %>%
-            select(prob)
+    #  Back off to weighted bigram probabilities
+    bigram_prob_table <- prob_table %>%
+        select(word2, output, bo_bigram_prob) %>%
+        distinct(word2, output, .keep_all = TRUE)
+    probs2 <- inner_join(bigram_prob_table, words_subset,
+                         by = join_by(word2 == word2,
+                                      output == word3)) %>%
+        select(word2, output, bo_bigram_prob)
+    # Subset the words with no match
+    words_subset <- anti_join(words_subset, probs2,
+                              by = join_by(word2 == word2,
+                                           word3 == output))
+    # Tracker
+    print("Bigram Probabilities matched")
 
-        # Get the unk token probability if nothing matches
-        if(nrow(p) == 0) {
-            p <- interpolated_prob_table$prob[nrow(interpolated_prob_table)]
-        }
-
-        # Tracker
-        if(i %% 1000 == 0) {
-            print(paste0("Probability: ", i, " trigrams done"))
-        }
-
-        return(unlist(p))
-    })
+    # Back off to weighted unigram probabilities
+    unigram_prob_table <- prob_table %>%
+        select(output, bo_unigram_prob) %>%
+        distinct(output, .keep_all = TRUE)
+    probs3 <- inner_join(unigram_prob_table, words_subset,
+                         by = join_by(output == word3))
+    # Tracker
+    print("Unigram Probabilities matched")
 
     # Convert to log
+    probs <- c(probs1$trigram_prob, probs2$bo_bigram_prob, probs3$bo_unigram_prob)
     probs <- log2(probs)
-
-    # Calculate the number of trigrams in the test set
-    Wt <- nrow(words)
 
     # Calculate perplexity
     cross_entropy <- -sum(probs)/Wt
     perplexity <- 2^cross_entropy
 
-    # Check the accuracy
-    accuracy <- sapply(1:nrow(words), function(i) {
+    # Sanity check
+    print(paste0("Perplexity = ", perplexity))
 
-        # Check for trigram
-        predictions <- prob_table %>%
-            filter(word1 == words[i, 1], word2 == words[i, 2]) %>%
-            arrange(desc(trigram_prob)) %>%
-            select(output) %>%
-            unlist()
+    # Calculate accuracy
+    accuracy <- vector(mode = "integer")
+    # Check at the trigram level
+    top3 <- prob_table %>%
+        select(word1, word2, output, trigram_prob) %>%
+        slice_max(order_by = trigram_prob, n = 3,
+                  by = c(word1, word2), with_ties = FALSE)
+    # Match
+    match <- inner_join(words, top3, by = join_by(word1 == word1, word2 == word2,
+                                                  word3 == output))
+    accuracy <- c(accuracy, nrow(match))
+    # Exclude out already matched bigrams
+    words_subset <- anti_join(words, match, by = join_by(word1 == word1,
+                                                         word2 == word2,
+                                                         word3 == word3))
 
-        # Back off to bigrams
-        if(length(predictions) < 3) {
-            predictions <- prob_table %>%
-                filter(word2 == words[i, 2]) %>%
-                arrange(desc(bo_bigram_prob)) %>%
-                select(output) %>%
-                unlist()
-            predictions <- unique(predictions)
-        }
+    # Back off to bigram level
+    top3 <- prob_table %>%
+        select(word2, output, bo_bigram_prob) %>%
+        distinct(word2, output, .keep_all = TRUE) %>%
+        slice_max(order_by = bo_bigram_prob, n = 3,
+                  by = word2, with_ties = FALSE)
+    # Match
+    match <- inner_join(words_subset, top3, by = join_by(word2 == word2,
+                                                         word3 == output))
+    accuracy <- c(accuracy, nrow(match))
+    # Exclude out already matched bigrams
+    words_subset <- anti_join(words_subset, match,
+                              by = join_by(word2 == word2, word3 == word3))
+    # Tracker
+    print("Bigrams matched")
 
-        # Back off to unigrams
-        # Limit to word1
-        if(length(predictions) < 3) {
-            predictions <- prob_table %>%
-                filter(word1 == words[i, 1]) %>%
-                arrange(desc(bo_unigram_prob)) %>%
-                select(output) %>%
-                unlist()
-            predictions <- unique(predictions)
-        }
-        # If nothing matches
-        if(length(predictions) < 3) {
-            predictions <- prob_table %>%
-                arrange(desc(bo_unigram_prob)) %>%
-                select(output) %>%
-                unlist()
-            predictions <- unique(predictions)
-        }
-
-        # Get the top 3 predictions
-        predictions <- predictions[1:3]
-
-        # Tracker
-        if(i %% 1000 == 0) {
-            print(paste0("Predictions: ", i, " trigrams done"))
-        }
-
-        # Check if it matches w[2]
-        return(words[i, 3] %in% predictions)
-    })
+    # Back off to unigrams
+    # Get the top 3 choices for unigrams
+    top3 <- prob_table %>%
+        select(output, bo_unigram_prob) %>%
+        distinct(output, .keep_all = TRUE) %>%
+        slice_max(order_by = bo_unigram_prob, n = 3, with_ties = FALSE)
+    # Match
+    match <- inner_join(words_subset, top3, by = join_by(word3 == output))
+    accuracy <- c(accuracy, nrow(match))
+    # Tracker
+    print("Unigrams matched")
 
     # Calculate accuracy
     accuracy <- sum(accuracy)/Wt
 
+    # Sanity check
+    print(paste0("Accuracy = ", round(accuracy*100, 2), " %"))
+
     # Return a evaluation table
-    return(tibble(model = "mkn_trigram", sample_size = N,
+    return(tibble(model = "mkn_trigram",
+                  sample_size = N,
+                  vocab_size = nrow(vocab) - 5,
                   cross_entropy = cross_entropy,
-                  perplexity = perplexity, accuracy = accuracy))
+                  perplexity = perplexity,
+                  accuracy = accuracy))
 }
 
 # Load in the validation data set
@@ -858,7 +864,7 @@ gc()
 
 load("data/train_sentences.RData")
 
-Nsample <- 600000
+Nsample <- 200000
 # Take a random sample of 200k sentences
 # Other sample sizes tried 400k, 600k, 800k, 1M, and 1.5M
 # 2M sentences on the train sample causes ran out of memory issues
@@ -871,11 +877,11 @@ gc()
 
 # Distribution of words
 library(dplyr)
-library(ggplot2)
-train_sample %>%
-    mutate(n_words = tokenizers::count_words(text)) %>%
-    ggplot(aes(n_words)) +
-    geom_bar()
+# library(ggplot2)
+# train_sample %>%
+#     mutate(n_words = tokenizers::count_words(text)) %>%
+#     ggplot(aes(n_words)) +
+#     geom_bar()
 #' **At 400k sample**
 #' Very few have sentences longer then 75
 #' Max words per sentence = 12
@@ -977,8 +983,6 @@ quadgram_mkn_model <- function(data, vocab) {
     # Normalize by dividing by den
     counts <- counts %>%
         mutate(lambda1 = lambda_num/den, .keep = "unused")
-    # Calculate a mean value to use with unk probability after unigram
-    mean_lambda1 <- mean(counts$lambda1)
 
     # -----Term 2-----
     # Term 2 will be the BO-weighted trigram probabilities
@@ -1041,8 +1045,6 @@ quadgram_mkn_model <- function(data, vocab) {
     counts <- counts %>%
         mutate(lambda2 = lambda_num/den) %>%
         select(-c(lambda_num, den))
-    # Calculate a mean value to use with unk probability after unigram
-    mean_lambda2 <- mean(counts$lambda2)
 
     # -----Term 3-----
     # Term 3 will be the BO-weighted bigram probabilities
@@ -1105,8 +1107,6 @@ quadgram_mkn_model <- function(data, vocab) {
     counts <- counts %>%
         mutate(lambda3 = lambda_num/den) %>%
         select(-c(lambda_num, den))
-    # Calculate a mean value to use with unk probability after unigram
-    mean_lambda3 <- mean(counts$lambda3)
 
     # -----Term 4-----
     # Term 4 will be the BO-weighted unigram probabilities
@@ -1148,25 +1148,6 @@ quadgram_mkn_model <- function(data, vocab) {
     probs <- counts %>%
         mutate(term4 = lambda1 * lambda2 * lambda3 * mkn_count/den) %>%
         select(-c(mkn_count, lambda1, lambda2, lambda3))
-
-    # # -----BO weight 4-----
-    # # This will be used for <unk> token
-    # # Add the token for <unk> to the vocabulary
-    # unk_token_vocab <- vocab$vocabulary[nrow(vocab)] + 1L
-    # vocab <- rbind(vocab[,2:3], tibble(vocabulary = unk_token_vocab,
-    #                                    token = "<unk>"))
-
-    # # Left out weight, which is simply 1 - lambda1*lambda2*lambda3
-    # # multiplied by 1/V, where V is vocabulary set
-    # V <- nrow(vocab)
-    # probs <- rbind(probs, tibble(word1 = unk_token_vocab,
-    #                              word2 = unk_token_vocab,
-    #                              word3 = unk_token_vocab,
-    #                              word4 = unk_token_vocab,
-    #                              term1 = 0,
-    #                              term2 = 0,
-    #                              term3 = 0,
-    #                              term4 = ))
 
     # Change the names to be more descriptive
     names(probs) <- c("word1", "word2", "word3", "output", "quadgram_prob",
@@ -1227,178 +1208,77 @@ evaluate_quadgram_model <- function(prob_table, vocab, test, N) {
     words <- words %>%
         distinct(word1, word2, word3, word4)
 
-    # Print for sanity check
-    print(paste0("Total number of unique quadgrams in the test set: ", nrow(words)))
-
-    # Convert it to a matrix
-    words <- as.matrix(words)
-
-    # For probabilities we will use interpolated model
-    interpolated_prob_table <- prob_table %>%
-        mutate(prob = quadgram_prob + bo_trigram_prob + bo_bigram_prob + bo_unigram_prob,
-               .keep = "unused")
-
-    # Get the probabilities from the table
-    probs <- sapply(1:nrow(words), function(i) {
-
-        # Check for quadgram
-        p <- interpolated_prob_table %>%
-            filter(word1 == words[i, 1], word2 == words[i, 2],
-                   word3 == words[i, 3], output == words[i, 4]) %>%
-            select(prob)
-
-        # Get the unk token probability if no matches
-        if(nrow(p) == 0) {
-            p <- interpolated_prob_table$prob[nrow(interpolated_prob_table)]
-        }
-
-        # Tracker
-        if(i %% 1000 == 0) {
-            print(paste0("Probability: ", i, " quadgrams done"))
-        }
-
-        return(unlist(p))
-    })
-
-    # Convert to log
-    probs <- log2(probs)
-
     # Calculate the number of quadgrams in the test set
     Wt <- nrow(words)
+
+    # Print for sanity check
+    print(paste0("Total number of unique quadgrams in the test set: ", Wt))
+
+    # Get the probabilities
+    probs1 <- inner_join(prob_table, words,
+                         by = join_by(word1 == word1, word2 == word2,
+                                      word3 == word3, output == word4)) %>%
+        select(word1, word2, word3, output, quadgram_prob)
+    # Subset the words with no match
+    words_subset <- anti_join(words, probs1,
+                              by = join_by(word1 == word1, word2 == word2,
+                                           word3 == word3, word4 == output))
+    # Tracker
+    print("Quadgram Probabilities matched")
+
+    # Back off to trigrams
+    trigram_prob_table <- prob_table %>%
+        select(word2, word3, output, bo_trigram_prob) %>%
+        distinct(word2, word3, output, .keep_all = TRUE)
+    probs2 <- inner_join(trigram_prob_table, words_subset,
+                         by = join_by(word2 == word2, word3 == word3,
+                                      output == word4)) %>%
+        select(word2, word3, output, bo_trigram_prob)
+    # Subset the words with no match
+    words_subset <- anti_join(words_subset, probs2,
+                              by = join_by(word2 == word2, word3 == word3,
+                                           word4 == output))
+    # Tracker
+    print("Trigram Probabilities matched")
+
+    #  Back off to weighted bigram probabilities
+    bigram_prob_table <- prob_table %>%
+        select(word3, output, bo_bigram_prob) %>%
+        distinct(word3, output, .keep_all = TRUE)
+    probs3 <- inner_join(bigram_prob_table, words_subset,
+                         by = join_by(word3 == word3,
+                                      output == word4)) %>%
+        select(word3, output, bo_bigram_prob)
+    # Subset the words with no match
+    words_subset <- anti_join(words_subset, probs3,
+                              by = join_by(word3 == word3,
+                                           word4 == output))
+    # Tracker
+    print("Bigram Probabilities matched")
+
+    # Back off to weighted unigram probabilities
+    unigram_prob_table <- prob_table %>%
+        select(output, bo_unigram_prob) %>%
+        distinct(output, .keep_all = TRUE)
+    probs4 <- inner_join(unigram_prob_table, words_subset,
+                         by = join_by(output == word4))
+    # Tracker
+    print("Unigram Probabilities matched")
+
+    # Convert to log
+    probs <- c(probs1$quadgram_prob, probs2$bo_trigram_prob,
+               probs3$bo_bigram_prob, probs4$bo_unigram_prob)
+    probs <- log2(probs)
 
     # Calculate perplexity
     cross_entropy <- -sum(probs)/Wt
     perplexity <- 2^cross_entropy
 
-    # Check the accuracy
-    accuracy <- sapply(1:nrow(words), function(i) {
-
-        # Check for trigram
-        predictions <- prob_table %>%
-            filter(word1 == words[i, 1], word2 == words[i, 2], word3 == words[i, 3]) %>%
-            arrange(desc(quadgram_prob)) %>%
-            select(output) %>%
-            unlist()
-
-        # Back off to trigrams
-        if(length(predictions) < 3) {
-            predictions <- prob_table %>%
-                filter(word2 == words[i, 2], word3 == words[i, 3]) %>%
-                arrange(desc(bo_trigram_prob)) %>%
-                select(output) %>%
-                unlist()
-            predictions <- unique(predictions)
-        }
-
-        # Back off to bigrams
-        if(length(predictions) < 3) {
-            predictions <- prob_table %>%
-                filter(word3 == words[i, 3]) %>%
-                arrange(desc(bo_bigram_prob)) %>%
-                select(output) %>%
-                unlist()
-            predictions <- unique(predictions)
-        }
-
-        # Back off to unigrams
-        # Limit to word1 and word2
-        if(length(predictions) < 3) {
-            predictions <- prob_table %>%
-                filter(word1 == words[i, 1], word2 == words[i, 2]) %>%
-                arrange(desc(bo_unigram_prob)) %>%
-                select(output) %>%
-                unlist()
-            predictions <- unique(predictions)
-        }
-        # Limit to word2
-        if(length(predictions) < 3) {
-            predictions <- prob_table %>%
-                filter(word2 == words[i, 2]) %>%
-                arrange(desc(bo_unigram_prob)) %>%
-                select(output) %>%
-                unlist()
-            predictions <- unique(predictions)
-        }
-        # Limit to word1
-        if(length(predictions) < 3) {
-            predictions <- prob_table %>%
-                filter(word1 == words[i, 1]) %>%
-                arrange(desc(bo_unigram_prob)) %>%
-                select(output) %>%
-                unlist()
-            predictions <- unique(predictions)
-        }
-        # If nothing matches
-        if(length(predictions) < 3) {
-            predictions <- prob_table %>%
-                arrange(desc(bo_unigram_prob)) %>%
-                select(output) %>%
-                unlist()
-            predictions <- unique(predictions)
-        }
-
-        # Get the top 3 predictions
-        predictions <- predictions[1:3]
-
-        # Tracker
-        if(i %% 1000 == 0) {
-            print(paste0("Predictions: ", i, " quadgrams done"))
-        }
-
-        # Check if it matches w[i, 4]
-        return(words[i, 4] %in% predictions)
-    })
-
-    # Calculate accuracy
-    accuracy <- sum(accuracy)/Wt
-
-    # Return a evaluation table
-    return(tibble(model = "mkn_quadgram", sample_size = N,
-                  cross_entropy = cross_entropy,
-                  perplexity = perplexity, accuracy = accuracy))
-}
-
-# Accuracy on different sizes of train samples
-evaluate_quadgram_model <- function(prob_table, vocab, test, N) {
-
-    require(stringr)
-    require(tokenizers)
-    require(dplyr)
-    require(tidyr)
-
-    # Remove eos from the data set
-    pattern <- " eos"
-    words <- str_remove_all(test$text, pattern = pattern)
-
-    # Divide each sentence into quadgrams
-    words <- unlist(tokenize_ngrams(words, n = 4L, simplify = TRUE))
-
-    # Store as a tibble and separate into individual words
-    words <- tibble(quadgrams = words) %>%
-        separate(quadgrams, c("word1", "word2", "word3", "output"), sep = " ")
-
-    # Convert to one hot encodes from the train set
-    words$word1 <- vocab$vocabulary[match(words$word1, vocab$token)]
-    words$word2 <- vocab$vocabulary[match(words$word2, vocab$token)]
-    words$word3 <- vocab$vocabulary[match(words$word3, vocab$token)]
-    words$output <- vocab$vocabulary[match(words$output, vocab$token)]
-
-    # Replace any NAs with unk token index
-    unk_vocab <- vocab$vocabulary[which(vocab$token == "<unk>")]
-    words$word1[which(is.na(words$word1))] <- unk_vocab
-    words$word2[which(is.na(words$word2))] <- unk_vocab
-    words$word3[which(is.na(words$word3))] <- unk_vocab
-    words$output[which(is.na(words$output))] <- unk_vocab
-
-    # Calculate the number of quadgrams in the test set
-    Wt <- nrow(words)
-
-    # Print for sanity check
-    print(paste0("Total number of quadgrams in the test set: ", Wt))
+    # Sanity check
+    print(paste0("Perplexity = ", perplexity))
 
     # Defining an empty vector for accuracy
     accuracy <- vector(mode = "integer")
-
     # Get matches at the quadgram level
     # Get the top 3 choices for each combination of word1, word2, and word3
     top3 <- prob_table %>%
@@ -1406,10 +1286,12 @@ evaluate_quadgram_model <- function(prob_table, vocab, test, N) {
         slice_max(order_by = quadgram_prob, n = 3,
                   by = c(word1, word2, word3), with_ties = FALSE)
     # Match
-    match <- inner_join(words, top3)
+    match <- inner_join(words, top3, by = join_by(word1 == word1, word2 == word2,
+                                                  word3 == word3, word4 == output))
     accuracy <- c(accuracy, nrow(match))
     # Exclude out already matched quadgrams
-    word_subset <- anti_join(words, match)
+    words_subset <- anti_join(words, match, by = join_by(word1 == word1, word2 == word2,
+                                                         word3 == word3, word4 == word4))
     # Tracker
     print("Quadgrams matched")
 
@@ -1421,10 +1303,14 @@ evaluate_quadgram_model <- function(prob_table, vocab, test, N) {
         slice_max(order_by = bo_trigram_prob, n = 3,
                   by = c(word2, word3), with_ties = FALSE)
     # Match
-    match <- inner_join(word_subset, top3)
+    match <- inner_join(words_subset, top3, by = join_by(word2 == word2,
+                                                         word3 == word3,
+                                                         word4 == output))
     accuracy <- c(accuracy, nrow(match))
     # Exclude out already matched quadgrams
-    word_subset <- anti_join(word_subset, match)
+    words_subset <- anti_join(words_subset, match, by = join_by(word2 == word2,
+                                                                word3 == word3,
+                                                                word4 == word4))
     # Tracker
     print("Trigrams matched")
 
@@ -1436,10 +1322,12 @@ evaluate_quadgram_model <- function(prob_table, vocab, test, N) {
         slice_max(order_by = bo_bigram_prob, n = 3,
                   by = word3, with_ties = FALSE)
     # Match
-    match <- inner_join(word_subset, top3)
+    match <- inner_join(words_subset, top3, by = join_by(word3 == word3,
+                                                         word4 == output))
     accuracy <- c(accuracy, nrow(match))
     # Exclude out already matched quadgrams
-    word_subset <- anti_join(word_subset, match)
+    words_subset <- anti_join(words_subset, match, by = join_by(word3 == word3,
+                                                                word4 == word4))
     # Tracker
     print("Bigrams matched")
 
@@ -1451,10 +1339,14 @@ evaluate_quadgram_model <- function(prob_table, vocab, test, N) {
         slice_max(order_by = bo_unigram_prob, n = 3,
                   by = c(word1, word2), with_ties = FALSE)
     # Match
-    match <- inner_join(word_subset, top3)
+    match <- inner_join(words_subset, top3, by = join_by(word1 == word1,
+                                                         word2 == word2,
+                                                         word4 == output))
     accuracy <- c(accuracy, nrow(match))
     # Exclude out already matched quadgrams
-    word_subset <- anti_join(word_subset, match)
+    words_subset <- anti_join(words_subset, match, by = join_by(word1 == word1,
+                                                                word2 == word2,
+                                                                word4 == word4))
     # Tracker
     print("Unigrams with word1, word2 context matched")
 
@@ -1465,52 +1357,61 @@ evaluate_quadgram_model <- function(prob_table, vocab, test, N) {
         slice_max(order_by = bo_unigram_prob, n = 3,
                   by = word2, with_ties = FALSE)
     # Match
-    match <- inner_join(word_subset, top3)
+    match <- inner_join(words_subset, top3, by = join_by(word2 == word2,
+                                                         word4 == output))
     accuracy <- c(accuracy, nrow(match))
     # Exclude out already matched quadgrams
-    word_subset <- anti_join(word_subset, match)
+    words_subset <- anti_join(words_subset, match, by = join_by(word2 == word2,
+                                                                word4 == word4))
     # Tracker
     print("Unigrams with word2 context matched")
 
-    # Get the top 3 choices for each word2
+    # Get the top 3 choices for each word1
     top3 <- prob_table %>%
         select(word1, output, bo_unigram_prob) %>%
         distinct(word1, output, .keep_all = TRUE) %>%
         slice_max(order_by = bo_unigram_prob, n = 3,
                   by = word1, with_ties = FALSE)
     # Match
-    match <- inner_join(word_subset, top3)
+    match <- inner_join(words_subset, top3, by = join_by(word1 == word1,
+                                                         word4 == output))
     accuracy <- c(accuracy, nrow(match))
     # Exclude out already matched quadgrams
-    word_subset <- anti_join(word_subset, match)
+    words_subset <- anti_join(words_subset, match, by = join_by(word1 == word1,
+                                                                word4 == word4))
     # Tracker
     print("Unigrams with word1 context matched")
 
-    # Get the top 3 choices for each word2
+    # Get the top 3 choices without any context
     top3 <- prob_table %>%
         select(output, bo_unigram_prob) %>%
         distinct(output, .keep_all = TRUE) %>%
         slice_max(order_by = bo_unigram_prob, n = 3, with_ties = FALSE)
     # Match
-    match <- inner_join(word_subset, top3)
+    match <- inner_join(words_subset, top3, by = join_by(word4 == output))
     accuracy <- c(accuracy, nrow(match))
-    # Exclude out already matched quadgrams
-    word_subset <- anti_join(word_subset, match)
     # Tracker
-    print("Unigrams with no context matched")
+    print("Unigrams matched")
 
     # Calculate accuracy
     accuracy <- sum(accuracy)/Wt
 
+    # Sanity check
+    print(paste0("Accuracy = ", round(accuracy*100, 2), " %"))
+
     # Return a evaluation table
-    return(tibble(model = "mkn_quadgram", sample_size = N,
-                  cross_entropy = NA, perplexity = NA, accuracy = accuracy))
+    return(tibble(model = "mkn_quadgram",
+                  sample_size = N,
+                  vocab_size = nrow(vocab) - 5,
+                  cross_entropy = cross_entropy,
+                  perplexity = perplexity,
+                  accuracy = accuracy))
 }
 
 # Load in the validation data set
 load("data/validation_sentences.RData")
 
-# Evaluate the unigram model
+# Evaluate the quadgram model
 result <- evaluate_quadgram_model(quadgram_model_probs, quadgram_model_vocab,
                                   validation, Nsample)
 
@@ -1519,34 +1420,122 @@ write.table(result, file = "data/mkn_metrics.csv", row.names = FALSE,
             append = TRUE, col.names = FALSE, sep = ",", quote = FALSE)
 
 # Save the model
-save(quadgram_model_probs, quadgram_model_vocab, file = "data/mkn_quadgram_model_1halfM.RData")
+save(quadgram_model_probs, quadgram_model_vocab, file = "data/mkn_quadgram_model200k.RData")
 
 # Remove
 rm(quadgram_model_probs, quadgram_model_vocab, result)
 gc()
 
-# -------------------- Final Model -------------------------------------
+# Quadgram model finalized
+# Pentagram model has too much sparsity to be viable since all pentagrams
+# occur only once in the train sample
+#' **Next step**
+# ------------------Tuning the number of train samples-------------------------
 
-# Final model will be mkn_quadgram_model with 1.5M training sentences
-load("data/mkn_quadgram_model_1halfM.RData")
+# Since all will have different amount of vocab size, best comparison
+# can only be with accuracy, and not perplexity/cross_entropy
+# These are recorded just in case we decide to limit vocabulary size
+library(dplyr)
+load("data/train_sentences.RData")
 
-# Check the model accuracy on the test set which was not used during
-# model building
-load("data/test_sentences.RData")
-Nsample <- 1500000
+# Load in the validation data set
+load("data/validation_sentences.RData")
+
+Nsample <- c(500000, 750000, 1000000, 1250000, 1500000)
+# Other sample sizes tried 500k, 750k, 1M, 1.25M, 1.5M
+# 2M sentences on the train sample causes ran out of memory issues
+set.seed(20823) # setting seed for reproducibility
+train_sample <- train[sample(1:nrow(train), size = Nsample[i]),]
+
+# Remove train dataset
+rm(train)
+gc()
+
+# Distribution of words
+# library(dplyr)
+# library(ggplot2)
+# train_sample %>%
+#     mutate(n_words = tokenizers::count_words(text)) %>%
+#     ggplot(aes(n_words)) +
+#     geom_bar()
+#' **At 500k sample**
+#' Very few have sentences longer then 75
+#' Most sentences under 12
+#'
+#' **At 750k sample**
+#' Very few have sentences longer then 75
+#' Most sentences under 12
+#'
+#' **At 1M sample**
+#' Very few have sentences longer then 75
+#' Most sentences under 12
+#'
+#' **At 1.25M sample**
+#' Very few have sentences longer then 75
+#' Most sentences under 15
+#'
+#' **At 1.5M sample**
+#' Very few have sentences longer then 75
+#' Most sentences under 15
+
+# Moving on to quadgram model
+# Tokenize our train sample
+tokens <- tokenizer(train_sample, n = 4)
+# Ran out of memory at 2M sentences
+
+# Extracting the one hot encoded data table and word index
+baked_train <- tokens[[1]]
+vocab_index <- tokens[[2]]
+
+# Remove the train sample, and list return
+rm(train_sample, tokens)
+gc()
+
+# Apply the quadgram model to the baked train sample
+result <- quadgram_mkn_model(baked_train, vocab_index)
+
+# Extract the tables from the result
+quadgram_model_probs <- result[[1]]
+quadgram_model_vocab <- result[[2]]
+rm(result, baked_train, vocab_index)
+gc()
+
+# # Load in the validation data set
+# load("data/validation_sentences.RData")
+
+# Evaluate the quadgram model
 result <- evaluate_quadgram_model(quadgram_model_probs, quadgram_model_vocab,
-                                  test, Nsample)
+                                  validation, Nsample[i])
 
-# Save this result
-write.csv(result, file = "data/mkn_final_model_metrics.csv", row.names = FALSE,
-          quote = FALSE)
+# Check the metrics
+result
 
-# Last task before final model is saved
-# Remove any curse words from the output column
+# Save the metrics
+write.table(result, file = "data/mkn_metrics.csv", row.names = FALSE,
+            append = TRUE, col.names = FALSE, sep = ",", quote = FALSE)
+
+# Save the model
+save(quadgram_model_probs, quadgram_model_vocab,
+     file = paste0("data/mkn_quadgram_model", Nsample[i]/10^6, "M.RData"))
+
+# Remove
+rm(quadgram_model_probs, quadgram_model_vocab, result)
+gc()
+
+#' The increase in accuracy is affected by limited gains above 750k/1M
+#' Thus, A smaller model thus would perform as good as the bigger one
+#' **Next step**
+# -------------Determine how large of data we can use in the app-------------
+
+library(dplyr)
+# Prepare the model data to use in the app
+# Get the top3 values for each n-gram level at 1.5 M, which we can reduce down
+# step by step
+load("data/mkn_quadgram_model1.5M.RData")
+# Remove bad words from the output column
 # Download the Kaggle bad bad words data set
 #' [Link](https://www.kaggle.com/datasets/nicapotato/bad-bad-words/download?datasetVersionNumber=1)
 bad_words <- read.csv("data/bad-words.csv")
-
 # Find out the vocabulary values if any occur in the vocabulary
 bad_words_vocab <- quadgram_model_vocab$vocabulary[match(bad_words$jigaboo,
                                                          quadgram_model_vocab$token)]
@@ -1557,20 +1546,107 @@ bad_words_vocab <- tibble(output = bad_words_vocab)
 
 # Remove any rows which contain these as outputs
 final_model <- anti_join(quadgram_model_probs, bad_words_vocab)
-final_model_vocab <- quadgram_model_vocab
+vocab <- quadgram_model_vocab
 
-# Get the object size
-print(object.size(final_model), units = "Mb")
-print(object.size(final_model_vocab), units = "Mb")
+# Remove and free up memory
+rm(quadgram_model_probs, quadgram_model_vocab, bad_words, bad_words_vocab)
+gc()
 
-# Save the final model
-save(final_model, final_model_vocab, file = "data/final_mkn_model.RData")
+# Remove any rows with unk_token from the output column
+unk_vocab <- vocab$vocabulary[match("<unk>", vocab$token)]
+unk_vocab <- tibble(output = unk_vocab)
+final_model <- anti_join(final_model, unk_vocab)
 
-#' 1.5 M causes oom issues
-#' Moving to lower model
-load("data/mkn_quadgram_model600k.RData")
+# Prepare top3 probability tables for each n-gram level
+top3_quadgram <- final_model %>%
+    select(word1, word2, word3, output, quadgram_prob) %>%
+    slice_max(order_by = quadgram_prob, n = 3,
+              by = c(word1, word2, word3), with_ties = FALSE) %>%
+    select(word1, word2, word3, output)
 
-# remove bad words
+# Back off to trigrams
+top3_trigram <- final_model %>%
+    select(word2, word3, output, bo_trigram_prob) %>%
+    distinct(word2, word3, output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_trigram_prob, n = 3,
+              by = c(word2, word3), with_ties = FALSE) %>%
+    select(word2, word3, output)
+
+# Back off to bigrams
+top3_bigram <- final_model %>%
+    select(word3, output, bo_bigram_prob) %>%
+    distinct(word3, output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_bigram_prob, n = 3,
+              by = word3, with_ties = FALSE) %>%
+    select(word3, output)
+
+# Back off to unigrams
+# with word1 and word2 context
+top3_unigram12 <- final_model %>%
+    select(word1, word2, output, bo_unigram_prob) %>%
+    distinct(word1, word2, output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_unigram_prob, n = 3,
+              by = c(word1, word2), with_ties = FALSE) %>%
+    select(word1, word2, output)
+# with word2 context
+top3_unigram2 <- final_model %>%
+    select(word2, output, bo_unigram_prob) %>%
+    distinct(word2, output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_unigram_prob, n = 3,
+              by = word2, with_ties = FALSE) %>%
+    select(word2, output)
+# with word1 context
+top3_unigram1 <- final_model %>%
+    select(word1, output, bo_unigram_prob) %>%
+    distinct(word1, output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_unigram_prob, n = 3,
+              by = word1, with_ties = FALSE) %>%
+    select(word1, output)
+# with no context
+top3_unigram <- final_model %>%
+    select(output, bo_unigram_prob) %>%
+    distinct(output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_unigram_prob, n = 3, with_ties = FALSE) %>%
+    select(output)
+
+# Check the total size of these
+print(object.size(top3_quadgram) +
+          object.size(top3_trigram) +
+          object.size(top3_bigram) +
+          object.size(top3_unigram12) +
+          object.size(top3_unigram2) +
+          object.size(top3_unigram1) +
+          object.size(top3_unigram) +
+          object.size(vocab), units = "Mb")
+# 331.5 Mb at 1.5M train sentences
+
+# Save these and the vocab to the app directory
+save(top3_quadgram, top3_trigram, top3_bigram, top3_unigram12,
+     top3_unigram2, top3_unigram1, top3_unigram, vocab,
+     file = "text_ease/data/model.RData")
+
+# Define the app ui and server logic
+
+# Run profvis to look for bottlenecks
+library(profvis)
+library(shiny)
+profvis({
+    runApp("text_ease")
+}, prof_output = "data")
+
+profvis(prof_input = "data/file2410317b2072.Rprof")
+
+# Ran out of memory on the shinyapps webiste
+# 2023-08-25T08:41:01.185818+00:00 shinyapps:
+# Container event from container-8544890: oom (out of memory)
+
+# --------------------------------------------------------------------------
+
+# Check out 1M train sentences model
+library(dplyr)
+load("data/mkn_quadgram_model1M.RData")
+
+# Remove bad words
 bad_words <- read.csv("data/bad-words.csv")
 # Find out the vocabulary values if any occur in the vocabulary
 bad_words_vocab <- quadgram_model_vocab$vocabulary[match(bad_words$jigaboo,
@@ -1582,62 +1658,105 @@ bad_words_vocab <- tibble(output = bad_words_vocab)
 
 # Remove any rows which contain these as outputs
 final_model <- anti_join(quadgram_model_probs, bad_words_vocab)
-final_model_vocab <- quadgram_model_vocab
+vocab <- quadgram_model_vocab
 
-# Get the object size
-print(object.size(final_model), units = "Mb")
-print(object.size(final_model_vocab), units = "Mb")
+# Remove and free up memory
+rm(quadgram_model_probs, quadgram_model_vocab, bad_words, bad_words_vocab)
+gc()
 
-# Save the final model
-save(final_model, final_model_vocab, file = "text_ease/data/final_mkn_model.RData")
+# Remove any rows with unk_token from the output column
+unk_vocab <- vocab$vocabulary[match("<unk>", vocab$token)]
+unk_vocab <- tibble(output = unk_vocab)
+final_model <- anti_join(final_model, unk_vocab)
 
-# Moving one step up
-# Trying 800k
-load("data/mkn_quadgram_model800k.RData")
+# Prepare top3 probability tables for each n-gram level
+top3_quadgram <- final_model %>%
+    select(word1, word2, word3, output, quadgram_prob) %>%
+    slice_max(order_by = quadgram_prob, n = 3,
+              by = c(word1, word2, word3), with_ties = FALSE) %>%
+    select(word1, word2, word3, output)
 
-# remove bad words
-bad_words <- read.csv("data/bad-words.csv")
-# Find out the vocabulary values if any occur in the vocabulary
-bad_words_vocab <- quadgram_model_vocab$vocabulary[match(bad_words$jigaboo,
-                                                         quadgram_model_vocab$token)]
-# Remove any non matches, ie NAs
-bad_words_vocab <- bad_words_vocab[-which(is.na(bad_words_vocab))]
-# Convert to a tibble to ensure easier anti-join
-bad_words_vocab <- tibble(output = bad_words_vocab)
+# Back off to trigrams
+top3_trigram <- final_model %>%
+    select(word2, word3, output, bo_trigram_prob) %>%
+    distinct(word2, word3, output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_trigram_prob, n = 3,
+              by = c(word2, word3), with_ties = FALSE) %>%
+    select(word2, word3, output)
 
-# Remove any rows which contain these as outputs
-final_model <- anti_join(quadgram_model_probs, bad_words_vocab)
-final_model_vocab <- quadgram_model_vocab
+# Back off to bigrams
+top3_bigram <- final_model %>%
+    select(word3, output, bo_bigram_prob) %>%
+    distinct(word3, output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_bigram_prob, n = 3,
+              by = word3, with_ties = FALSE) %>%
+    select(word3, output)
 
-# Get the object size
-print(object.size(final_model), units = "Mb")
-print(object.size(final_model_vocab), units = "Mb")
+# Back off to unigrams
+# with word1 and word2 context
+top3_unigram12 <- final_model %>%
+    select(word1, word2, output, bo_unigram_prob) %>%
+    distinct(word1, word2, output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_unigram_prob, n = 3,
+              by = c(word1, word2), with_ties = FALSE) %>%
+    select(word1, word2, output)
+# with word2 context
+top3_unigram2 <- final_model %>%
+    select(word2, output, bo_unigram_prob) %>%
+    distinct(word2, output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_unigram_prob, n = 3,
+              by = word2, with_ties = FALSE) %>%
+    select(word2, output)
+# with word1 context
+top3_unigram1 <- final_model %>%
+    select(word1, output, bo_unigram_prob) %>%
+    distinct(word1, output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_unigram_prob, n = 3,
+              by = word1, with_ties = FALSE) %>%
+    select(word1, output)
+# with no context
+top3_unigram <- final_model %>%
+    select(output, bo_unigram_prob) %>%
+    distinct(output, .keep_all = TRUE) %>%
+    slice_max(order_by = bo_unigram_prob, n = 3, with_ties = FALSE) %>%
+    select(output)
 
-# Save the final model
-save(final_model, final_model_vocab, file = "text_ease/data/final_mkn_model.RData")
-# 800k causes oom issues as well
-# Final model will be 600k
+# Check the total size of these
+print(object.size(top3_quadgram) +
+          object.size(top3_trigram) +
+          object.size(top3_bigram) +
+          object.size(top3_unigram12) +
+          object.size(top3_unigram2) +
+          object.size(top3_unigram1) +
+          object.size(top3_unigram) +
+          object.size(vocab), units = "Mb")
+# 331.5 Mb at 1.5M train sentences
+# 230.3 Mb at 1M train sentences
 
-#' Moving to lower model
-load("data/mkn_quadgram_model600k.RData")
+# Save these and the vocab to the app directory
+save(top3_quadgram, top3_trigram, top3_bigram, top3_unigram12,
+     top3_unigram2, top3_unigram1, top3_unigram, vocab,
+     file = "text_ease/data/model.RData")
 
-# remove bad words
-bad_words <- read.csv("data/bad-words.csv")
-# Find out the vocabulary values if any occur in the vocabulary
-bad_words_vocab <- quadgram_model_vocab$vocabulary[match(bad_words$jigaboo,
-                                                         quadgram_model_vocab$token)]
-# Remove any non matches, ie NAs
-bad_words_vocab <- bad_words_vocab[-which(is.na(bad_words_vocab))]
-# Convert to a tibble to ensure easier anti-join
-bad_words_vocab <- tibble(output = bad_words_vocab)
+# Update the app on the website
+# No memory issues
 
-# Remove any rows which contain these as outputs
-final_model <- anti_join(quadgram_model_probs, bad_words_vocab)
-final_model_vocab <- quadgram_model_vocab
+#' **Quadgram model with 1M sentences in the training set is finalized**
 
-# Get the object size
-print(object.size(final_model), units = "Mb")
-print(object.size(final_model_vocab), units = "Mb")
+# Save the model
+save(final_model, vocab, file = "data/final_model.RData")
 
-# Save the final model
-save(final_model, final_model_vocab, file = "text_ease/data/final_mkn_model.RData")
+# --------------------- Final Test on the test set --------------------------
+
+load("data/test_sentences.RData")
+load("data/final_model.RData")
+
+# Evaluate the quadgram model
+result <- evaluate_quadgram_model(final_model, vocab, test, N = 1000000)
+
+# Check the metrics
+result
+
+# Save the result
+write.csv(result, file = "data/final_model_metrics.csv", quote = FALSE,
+          row.names = FALSE)
