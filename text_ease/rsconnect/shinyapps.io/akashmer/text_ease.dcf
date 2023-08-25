@@ -1,0 +1,12 @@
+name: text_ease
+title: text_ease
+username: akashmer
+account: akashmer
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 9668573
+bundleId: 7609989
+url: https://akashmer.shinyapps.io/text_ease/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
