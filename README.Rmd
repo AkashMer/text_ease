@@ -1,5 +1,8 @@
 ---
 output: github_document
+bibliography: https://api.citedrive.com/bib/e9200284-30f3-46f2-ace1-ad7cd125ad87/references.bib?x=eyJpZCI6ICJlOTIwMDI4NC0zMGYzLTQ2ZjItYWNlMS1hZDdjZDEyNWFkODciLCAidXNlciI6ICI1MTc1IiwgInNpZ25hdHVyZSI6ICJjZDFhM2U0NzhhMDZkZmRjZjI0ZGQ2ODVlMzcwNjBiOThkNzcxOGQwNWIyODE3YzAzZjEyNzQ0NTlmMjBjOGU5In0=/bibliography.bib
+csl: american-medical-association.csl
+link-citations: yes
 ---
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
@@ -17,5 +20,27 @@ knitr::opts_chunk$set(
 <!-- badges: end -->
 
 **Text-Ease**, an app which predicts the next word in a sentence and provide the user with 3 possible options to choose from.
+  
+### **Link to the app** - [Text-Ease](http://akashmer.shinyapps.io/text_ease)
+
+### **Link to the Slide-Deck** - [Text-Ease Slide Deck](https://rpubs.com/akashmer/text_ease_slide_deck)
 
 Data was made available as part of JHU Data Science Capstone Course in collaboration with Microsoft *Swiftkey* and can be downloaded from [here](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip)
+  
+# **References[@Data_Source;@Silge_2017;@Hvitfeldt_2021;@Manning_2008;@Chen_1999;@jurafsky2000speech]**
+  
+
+<div id="refs"></div>
+
+## **Directories and Files in the repository**
+  
+* **R** : A sub-directory to store all the raw R scripts and R markdown files used to create the report
+    + **download.R** : File to define function fro downloading the data
+    + **eda.R** : File meant for the author, contains all the rough exploratory data analysis done
+    + **kgrams_model.R** : Very slow model built using `kgrams` R package
+    + **milestone_report.Rmd** : Raw Rmarkdown file for the Milestone report describing data cleaning steps and exploratory data analysis
+    + **mkn_model.R** : **Code which was used behind the final model used in the app**
+    + **quiz1.R** : Code used to answer 1st week quiz questions
+    + **tidyData.R** : Preliminary data cleaning steps
+* **data** : A sub-directory to store the raw data used for the project.
+* **results** : A sub-directory to store the Milestone Report as an HTML file. A markdown version of the file and a figures sub-directory containing all the figures used in the report in PNG format can also be found here. HTML version of the Slide-Deck is also stored here
