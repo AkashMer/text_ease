@@ -1,6 +1,9 @@
 # Load required library
 library(shiny)
 library(shinydashboard)
+library(shinyWidgets)
+library(shinyhelper)
+library(dplyr)
 
 dashboardPage(
 
@@ -19,23 +22,21 @@ dashboardPage(
         # Adding a custom tag for the app name
         tags$head(
             tags$style(
-                ".main-header .logo{font-weight: bold;
-                font-size: 30px;
-                }"
-            ) # Closed tags style
-        ), # Closed tags head
+                HTML('.main-header .logo {
+                     font-family: "Helvetica Neue", "Comic Sans MS", Times, serif;
+                     font-weight: bold;
+                     font-size: 30px;
+                     }'))),
 
         # First row
-        fluidRow(
+        fluidRow(align = "center",
 
-            # Box 1 for output
-            valueBoxOutput("prediction1", width = 4),
-
-            # Box 2 for output
-            valueBoxOutput("prediction2", width = 4),
-
-            # Box 3 for output
-            valueBoxOutput("prediction3", width = 4)
+            # Output
+            box(
+                background = "navy",
+                width = 12,
+                uiOutput("outputBox", fill = TRUE)
+            ) # Closed output box
 
         ), # Closed first row
 
@@ -51,10 +52,36 @@ dashboardPage(
                     label = "",
                     value = "",
                     placeholder = "Enter text here"
-                ) # Closed textInput
+                ) %>% # Closed textInput
+                    helper(type = "markdown", colour = "red",
+                           content = "info"), # Added a help file
             ) # Closed input box
 
-        ) # Closed 2nd row
+        ), # Closed 2nd row
+
+        # Define third row for appendix
+        fluidRow(
+
+            # Input box
+            box(
+                width = 12,
+                title = markdown("**APPENDIX:**"),
+                markdown("*<span style=color:red;>Kindy click the red
+                         question mark if you have any
+                         questions on how to use the app</span>*"),
+                markdown("**Slide-Deck:**"),
+                markdown("More information on the app can be found
+                         [here](https://rpubs.com/akashmer/text_ease_slide_deck)"),
+                markdown("**Github Repository:**"),
+                markdown("Code for this app and model development can be
+                         found [here](https://github.com/AkashMer/text_ease)"),
+                markdown("**License Information:**"),
+                markdown("Code behind the model and app is licensed under
+                         [MIT License](https://github.com/AkashMer/text_ease/blob/main/LICENSE.md)")
+
+            ) # Closed input box
+
+        ) # Closed 3nd row
 
     ) # Closed dashboard body
 

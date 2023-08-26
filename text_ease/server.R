@@ -4,12 +4,28 @@ load("data/model.RData")
 # Load the required library
 library(shiny)
 library(shinydashboard)
+library(shinyWidgets)
+library(shinyhelper)
 library(tokenizers)
 library(dplyr)
 library(stringr)
 
 # Defining the server logic which will suggest the next 3 words
 function(input, output, session) {
+
+    # Observing the question mark helpers
+    observe_helpers(withMathJax = TRUE)
+
+    # Observe for click event on the radio buttons
+    observeEvent(input$output, {
+
+        new_input <- paste(input$input, input$output, collapse = " ")
+        updateTextInput(
+            session = session,
+            "input",
+            value = new_input
+        ) # Closed update Text Input
+    }) # Closed obser event
 
     # Get the predictions
     prediction <- reactive({
@@ -89,35 +105,30 @@ function(input, output, session) {
 
     }) # Closed prediction reactive
 
-    # Display the result into the 3 output boxes
-    output$prediction1 <- renderValueBox({
+    # Render and display the predictions
+    output$outputBox <- renderUI(
 
-        valueBox(
-            value = prediction()[1],
-            subtitle = "",
-            color = "light-blue",
-            icon = icon(NULL)
-        ) # Closed valueBox
-    }) # Closed renderValueBox
+        radioGroupButtons(
+            "output",
+            choices = prediction(),
+            selected = character(0),
+            size = "lg",
+            individual = TRUE,
+            status = "success"
+        ) # Closed radio group buttons
 
-    output$prediction2 <- renderValueBox({
+    ) # Closed render UI
 
-        valueBox(
-            value = prediction()[2],
-            subtitle = "",
-            color = "light-blue",
-            icon = icon(NULL)
-        ) # Closed valueBox
-    }) # Closed renderValueBox
-
-    output$prediction3 <- renderValueBox({
-
-        valueBox(
-            value = prediction()[3],
-            subtitle = "",
-            color = "light-blue",
-            icon = icon(NULL)
-        ) # Closed valueBox
-    }) # Closed renderValueBox
+    # Update the radio button
+    observeEvent(input$input, {
+        updateRadioGroupButtons(
+            session = session,
+            "output",
+            choices = prediction(),
+            selected = character(0),
+            size = "lg",
+            status = "success"
+        ) # Closed updateRadiogroupbutton
+    }) # Closed observe
 
 } # Closed serve function
