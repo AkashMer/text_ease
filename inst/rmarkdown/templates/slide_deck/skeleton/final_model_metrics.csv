@@ -1,0 +1,2 @@
+model,sample_size,vocab_size,cross_entropy,perplexity,accuracy
+mkn_quadgram,1e+06,103089,7.19393381215922,146.416447134649,0.293612533895752
